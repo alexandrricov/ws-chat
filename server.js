@@ -1,128 +1,198 @@
-// @ts-check
-"use strict";
-const webSocketsServerPort = 1337;
-const webSocketServer = require('websocket').server;
-const http = require('http');
+const WebSocket = require('ws');
 
-var server = http.createServer();
-server.listen(webSocketsServerPort, function() {
-    console.log((new Date()) + " Server is listening on port " + webSocketsServerPort);
-});
-var wsServer = new webSocketServer({
-    httpServer: server
-});
+// const usersMap = new WeakMap();
 
-/**
- * @typedef {Object} RicovChatMessage
- * @property {number} userId - user id
- * @property {'message' | 'system'} type - message type
- * @property {string} message - message text
- * @property {string} date - message date
- * @property {boolean} modified
- * @property {boolean} deleted
- */
-
-/**
- * @type {RicovChatMessage[]}
- */
-let history = [];
-
-/**
- * @typedef {Object} RicovChatUser
- * @property {number} id - user id
- * @property {string} name - user name
- */
-
-/**
- * @type {Object.<string, RicovChatUser>}
- */
-const users = {};
-
-var clients = [];
-
-function htmlEntities(str) {
-    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;')
-                      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
+const wss = new WebSocket.Server({ port: 8080 });
+// const server = http.createServer();
+// const wss = new WebSocket.Server({ noServer: true })
 
 /**
  * Generate unique id
  * @returns {number} - Unique id
  */
 const uniqueId = (() => {
-    let idCounter = 0;
+  let idCounter = 0;
 
-    return () => {
-        return ++idCounter;
-    }
+  return () => {
+      return ++idCounter;
+  }
 })();
 
-var colors = [ 'red', 'green', 'blue', 'magenta', 'purple', 'plum', 'orange' ];
-// colors.sort(function(a,b) { return Math.random() > 0.5; } );
+/**
+ * @typedef {Object} RicovChatMessage
+ * @property {number} id - id
+ * @property {number} userId - user id
+ * @property {'message'} type - message type
+ * @property {string} message - message text
+ * @property {string} date - message date
+ * @property {boolean} modified
+ * @property {boolean} deleted
+ */
+/**
+ * @typedef {Object} RicovSystemMessage
+ * @property {number} id - id
+ * @property {number} userId - user id
+ * @property {'system'} type - message type
+ * @property {'join' | 'left'} message - message text
+ * @property {string} date - message date
+ */
+/**
+ * @typedef {RicovChatMessage | RicovSystemMessage} RicovMessage
+ */
 
-wsServer.on('request', function(request) {
-    console.log((new Date()) + ' Connection from origin ' + request.origin + '.');
+/**
+ * @type {RicovMessage[]}
+ */
+let history = [];
 
-    // accept connection - you should check 'request.origin' to make sure that
-    // client is connecting from your website
-    // (http://en.wikipedia.org/wiki/Same_origin_policy)
-    var connection = request.accept(null, request.origin); 
-    // we need to know client index to remove them on 'close' event
-    var index = clients.push(connection) - 1;
-    var userName = false;
-    var userColor = false;
-    const id = uniqueId();
-    console.log(`ID: ${id}`);
+/**
+ * @typedef {Object} RicovUser
+ * @property {number} id - id
+ * @property {string} name - user name
+ * @property {boolean} active - is user online
+ */
 
-    console.log((new Date()) + ' Connection accepted.');
+/**
+ *
+ * @type {Object.<string, RicovUser>}
+ */
+const users = {};
 
-    // send back chat history
-    if (history.length > 0) {
-        connection.sendUTF(JSON.stringify( { type: 'history', data: history} ));
+wss.on('connection', function connection(ws, request) {
+  /** @type {RicovUser} */
+  const user = {
+    id:  uniqueId(),
+    name: '',
+    active: false,
+  };
+  users[user.id] = user;
+
+  /** @type {RicovSystemMessage} */
+  const joinMessage = {
+    id: uniqueId(),
+    userId: user.id,
+    type: 'system',
+    message: 'join',
+    date: new Date().toJSON(),
+  };
+  history.push(joinMessage);
+
+  // ws.send(JSON.stringify(['user', user]));
+  ws.send(JSON.stringify(['history', history]));
+  ws.send(JSON.stringify(['users', users, user.id]));
+
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN && client !== ws) {
+      client.send(JSON.stringify(['message', joinMessage]));
+    }
+  });
+
+  ws.on('message', function incoming(/** @type {string} */message) {
+    console.log('received: %s', message);
+
+    let parsed;
+    try {
+      parsed = JSON.parse(message);
+    } catch (e) {
+      console.error(e);
     }
 
-    connection.on('message', function(message) {
-        if (message.type === 'utf8') { // accept only text
-            if (userName === false) { // first message sent by user is their name
-                // remember user name
-                userName = htmlEntities(message.utf8Data);
-                // get random color and send it back to the user
-                userColor = colors.shift();
-                connection.sendUTF(JSON.stringify({ type:'color', data: userColor }));
-                console.log((new Date()) + ' User is known as: ' + userName
-                            + ' with ' + userColor + ' color.');
-            } else { // log and broadcast the message
-                console.log((new Date()) + ' Received Message from '
-                            + userName + ': ' + message.utf8Data);
-                
-                // we want to keep history of all sent messages
-                
-                var obj = {
-                    time: (new Date()).getTime(),
-                    text: htmlEntities(message.utf8Data),
-                    author: userName,
-                    color: userColor
-                };
-                history.push(obj);
-                history = history.slice(-100);
+    if (!parsed) {
+      console.log('some error message format received:', message);
+    }
 
-                // broadcast message to all connected clients
-                var json = JSON.stringify({ type:'message', data: obj });
-                for (var i=0; i < clients.length; i++) {
-                    clients[i].sendUTF(json);
-                }
-            }
+    switch (parsed[0]) {
+      case 'message': {
+        /** @type {RicovChatMessage} */
+        const newMessage = {
+          id: uniqueId(),
+          userId: user.id,
+          type: 'message',
+          message: parsed[1],
+          date: new Date().toJSON(),
+          modified: false,
+          deleted: false,
+        };
+        history.push(newMessage);
+
+        wss.clients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify(['message', newMessage]));
+          }
+        });
+        break;
+      }
+      case 'name': {
+        if (user) {
+          user.name = parsed[1];
         }
+
+        wss.clients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify(['users', users, user.id]));
+          }
+        });
+        break;
+      }
+      case 'remove': {
+        history.forEach(historyItem => {
+          if (historyItem.id === parsed[1]) {
+            historyItem.deleted = true;
+          }
+        });
+
+        wss.clients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(['history', history]));
+          }
+        });
+        break;
+      }
+      case 'edit': {
+        history.forEach(historyItem => {
+          if (historyItem.id === parsed[1]) {
+            historyItem.message = parsed[2];
+          }
+        });
+
+        wss.clients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(['history', history]));
+          }
+        });
+        break;
+      }
+      default:
+        console.log('No case defined for ', parsed)
+    }
+  });
+
+  ws.on('open', function open() {
+    console.log(`connected`);
+    ws.send(JSON.stringify(['history', history]));
+  });
+
+  ws.on('close', function close() {
+    console.log(`disconnected`);
+    /** @type {RicovSystemMessage} */
+    const leftMessage = {
+      id: uniqueId(),
+      userId: user.id,
+      type: 'system',
+      message: 'left',
+      date: new Date().toJSON(),
+    };
+    history.push(leftMessage);
+
+    user.active = false;
+
+    wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN && client !== ws) {
+        client.send(JSON.stringify(['message', leftMessage]));
+        client.send(JSON.stringify(['users', users, user.id]));
+      }
     });
 
-    connection.on('close', function(connection) {
-        if (userName !== false && userColor !== false) {
-            console.log((new Date()) + " Peer "
-                + connection.remoteAddress + " disconnected.");
-            clients.splice(index, 1);
-            // // push back user's color to be reused by another user
-            // colors.push(userColor);
-        }
-    });
-
+    ws.close()
+  });
 });

@@ -1,0 +1,29 @@
+.time {
+    color: #777777;
+}
+
+.systemMessageText {
+    color: #777777;
+}
+
+.nameRow {
+    position: relative;
+}
+
+.actions {
+    position: absolute;
+    top: 0;
+    right: 0;
+    display: flex;
+}
+
+.actions button {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    padding: 0;
+}
